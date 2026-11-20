@@ -172,6 +172,44 @@ static void patch_dlssg(void *handle, const char *fdpath) {
     memcpy(mov + 6, &arch, 4);
     if (patch_bytes(hit, mov, sizeof mov)) { shim_log("dlssg: mprotect failed"); return; }
     shim_log("dlssg: m_gpuArch spoofed to 0x%x", arch);
+
+    // DLSSG.MultiFrameCountMax: the device arch switch gives 0x170 (Ampere) the 1-frame branch; only 0x1b0 (Blackwell)
+    // reaches the multi-frame one. cmp eax,0x170 ; je <one> ; jbe ...  ->  je <multi> (the 0x1b0 target).
+    const char *mfg = getenv("DLSSG_SM86_MFG");
+    if (mfg && *mfg == '0') return;
+    static const uint16_t pat3[] = {0x3d, 0x70, 0x01, 0x00, 0x00, 0x74, 0x100, 0x0f, 0x86, 0x100, 0x100, 0x100, 0x100,
+                                    0x3d, 0x90, 0x01, 0x00, 0x00, 0x74, 0x100, 0x76, 0x100, 0x3d, 0xa0, 0x01, 0x00, 0x00,
+                                    0x74, 0x100, 0x3d, 0xb0, 0x01, 0x00, 0x00, 0x0f, 0x85};
+    hit = find_pattern(base, span, pat3, sizeof pat3 / sizeof pat3[0], &n);
+    if (n != 1) { shim_log("dlssg: MultiFrameCountMax pattern found %d times", n); return; }
+    // the multi-frame branch starts right after the jne rel32 that ends the 0x1b0 compare
+    uint8_t *multi = hit + sizeof pat3 / sizeof pat3[0] + 4;
+    uint8_t *je_end = hit + 7;
+    long rel = multi - je_end;
+    if (rel < -128 || rel > 127) { shim_log("dlssg: MFG branch out of range"); return; }
+    uint8_t r8 = (uint8_t)rel;
+    patch_bytes(hit + 6, &r8, 1);
+    // Same parameter, no device given: the highest arch of all GPUs, cmp r12d,0x1af ; jbe <one>  ->  nop.
+    static const uint16_t pat4[] = {0x41, 0x81, 0xfc, 0xaf, 0x01, 0x00, 0x00, 0x0f, 0x86};
+    uint8_t *h4 = find_pattern(base, span, pat4, sizeof pat4 / sizeof pat4[0], &n);
+    if (n == 1) {
+        static const uint8_t nop6[] = {0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00};
+        patch_bytes(h4 + 7, nop6, 6);
+    } else {
+        shim_log("dlssg: all-device MultiFrameCountMax pattern found %d times", n);
+    }
+    // Per feature: mfgSupported = device arch > 0x1af (seta [rbx+0x28]); Evaluate refuses a count > 1 without it
+    // (0xbad00005 "Multi frame is not supported on this device"). Threshold 0x1af -> 0x16f.
+    static const uint16_t pat5[] = {0x3d, 0xaf, 0x01, 0x00, 0x00, 0xc6, 0x43, 0x29, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00,
+                                    0x0f, 0x97, 0x43, 0x28};
+    uint8_t *h5 = find_pattern(base, span, pat5, sizeof pat5 / sizeof pat5[0], &n);
+    if (n == 1) {
+        static const uint8_t amp = 0x6f;
+        patch_bytes(h5 + 1, &amp, 1);
+    } else {
+        shim_log("dlssg: per-feature MFG flag pattern found %d times", n);
+    }
+    shim_log("dlssg: multi-frame generation allowed on this arch");
 }
 
 void shim_after_dlopen_h(void *h, const char *file) {
@@ -216,7 +254,9 @@ static void fix_caps(ngx_param *p) {
     unsigned int avail = 0, init = 0;
     ((get_ui_fn)p->vt[NGX_GET_UI])(p, "FrameGeneration.Available", &avail);
     ((get_ui_fn)p->vt[NGX_GET_UI])(p, "FrameGeneration.FeatureInitResult", &init);
-    shim_log("caps: FrameGeneration.Available=%u FeatureInitResult=0x%x", avail, init);
+    unsigned int mfmax = 0;
+    ((get_ui_fn)p->vt[NGX_GET_UI])(p, "DLSSG.MultiFrameCountMax", &mfmax);
+    shim_log("caps: FrameGeneration.Available=%u FeatureInitResult=0x%x DLSSG.MultiFrameCountMax=%u", avail, init, mfmax);
     if (!avail && init == 1) {
         ((set_ui_fn)p->vt[NGX_SET_UI])(p, "FrameGeneration.Available", 1);
         shim_log("caps: FrameGeneration.Available forced to 1");
