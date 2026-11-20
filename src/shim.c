@@ -1,6 +1,7 @@
-// dlssg-sm86-linux: LD_PRELOAD shim that lets the DLSS Frame Generation snippet run on RTX 30 (Ampere) under native
-// Linux Vulkan. Stage 1: lift the NGX core's snippet arch gate (NGXValidateSnippetMetaData: "snippet is using newer GPU
-// arch 190 > 170").
+// dlssg-sm86-linux: LD_PRELOAD shim that runs NVIDIA DLSS Frame Generation (incl. multi-frame) on RTX 20/30 in native
+// Linux Vulkan games. It patches the arch gates of the NGX core (libnvidia-ngx.so) and of the DLSS-G snippet in memory
+// (files on disk stay untouched, signatures are checked before the patches) and swaps the snippet's sm_89 kernels for
+// Ampere builds at vkCreateCuModuleNVX (vk.c).
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <link.h>
@@ -52,12 +53,12 @@ static int patch_bytes(uint8_t *at, const uint8_t *bytes, size_t n) {
 }
 
 // Executable PT_LOAD segment of a loaded object.
-struct seg { const char *want; uint8_t *base; size_t len; char path[512]; };
+struct seg { const char *want; uintptr_t load; uint8_t *base; size_t len; char path[512]; };
 
 static int phdr_cb(struct dl_phdr_info *info, size_t sz, void *data) {
     (void)sz;
     struct seg *s = data;
-    if (!info->dlpi_name || !strstr(info->dlpi_name, s->want)) return 0;
+    if (s->want ? (!info->dlpi_name || !strstr(info->dlpi_name, s->want)) : info->dlpi_addr != s->load) return 0;
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *p = &info->dlpi_phdr[i];
         if (p->p_type == PT_LOAD && (p->p_flags & PF_X)) {
@@ -73,6 +74,12 @@ static int phdr_cb(struct dl_phdr_info *info, size_t sz, void *data) {
 static int find_text(const char *name, struct seg *s) {
     memset(s, 0, sizeof *s);
     s->want = name;
+    return dl_iterate_phdr(phdr_cb, s) == 1;
+}
+
+static int find_text_at(uintptr_t load, struct seg *s) {
+    memset(s, 0, sizeof *s);
+    s->load = load;
     return dl_iterate_phdr(phdr_cb, s) == 1;
 }
 
@@ -155,14 +162,15 @@ static void patch_dlssg(void *handle, const char *fdpath) {
     // SetGPUArch(this, arch): test r12d,r12d ; je <query> ; mov [rbp+0x390],r12d  (m_gpuArch)
     // becomes mov dword [rbp+0x390], <spoof> ; nop2 - the snippet then picks its Ada (sm_89) kernel set, which the
     // CU-module hook swaps for Ampere builds.
-    struct seg t;
-    if (!find_text("/proc/self/fd/", &t)) return;
     static const uint16_t pat2[] = {0x45, 0x85, 0xe4, 0x74, 0x100, 0x44, 0x89, 0xa5, 0x90, 0x03, 0x00, 0x00};
     Dl_info di;
-    if (!dladdr(fn, &di)) return;
-    // search the whole executable segment of this snippet (the one fn lives in)
-    uint8_t *base = di.dli_fbase;
-    size_t span = 0x90000;
+    struct seg t;
+    if (!dladdr(fn, &di) || !find_text_at((uintptr_t)di.dli_fbase, &t)) {
+        shim_log("dlssg: text segment not found");
+        return;
+    }
+    uint8_t *base = t.base;
+    size_t span = t.len;
     hit = find_pattern(base, span, pat2, sizeof pat2 / sizeof pat2[0], &n);
     if (n != 1) { shim_log("dlssg: SetGPUArch pattern found %d times", n); return; }
     unsigned arch = 0x190;
@@ -242,6 +250,8 @@ static dlsym_fn real_dlsym(void) {
 
 void *real_dlsym_pub(void *h, const char *name) { return real_dlsym()(h, name); }
 
+// Capability parameters as the game sees them (diagnostic; FrameGeneration.Available is forced only if the core
+// patches above missed on a newer driver while the snippet still initialised).
 // NVSDK_NGX_Parameter (nvsdk_ngx_defs.h): Set(ull,float,double,uint,int,d3d11,d3d12,void*), Get(... same), Reset.
 typedef struct ngx_param { void **vt; } ngx_param;
 typedef void (*set_ui_fn)(ngx_param *, const char *, unsigned int);
