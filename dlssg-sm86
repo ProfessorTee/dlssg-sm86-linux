@@ -1,0 +1,6 @@
+#!/bin/sh
+# Runs a native Linux Vulkan game with DLSS Frame Generation unlocked for RTX 20/30:  dlssg-sm86 <game> [args]
+# Steam: launch options  /path/to/dlssg-sm86 %command%
+HERE=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+export LD_PRELOAD="$HERE/libdlssg_sm86.so${LD_PRELOAD:+:$LD_PRELOAD}"
+exec "$@"
