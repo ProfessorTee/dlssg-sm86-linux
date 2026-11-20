@@ -29,7 +29,10 @@ The kernel pack comes from sdli1995's release (MIT). `tools/make_pack.py` maps i
 snippet: 39 kernels are byte-identical to the Windows runtime, the rest match by PTX entry name. 69 of 71 kernels are covered.
 The two missing ones are capture/debug kernels that games don't use.
 
-All patches are byte patterns. A driver or runtime that changes them is reported in the log and left alone, so it can't crash.
+Patch sites are found from anchors instead of fixed offsets: the error string a gate prints (→ the `lea` that loads it →
+the one conditional jump into that error block), exported functions, and parameter names next to the arch switch they
+guard. A site is patched only if exactly one candidate is found. Otherwise the log says so and the site is left alone, so a
+changed driver or runtime ends up "not unlocked" instead of crashing.
 
 ## Install
 

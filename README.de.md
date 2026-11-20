@@ -31,8 +31,10 @@ Das Kernel-Paket stammt aus sdli1995s Release (MIT). `tools/make_pack.py` ordnet
 Linux-Snippets zu: 39 Kernels sind byte-gleich mit der Windows-Runtime, der Rest passt über den PTX-Entry-Namen. 69 von
 71 Kernels sind abgedeckt. Die zwei fehlenden sind Capture-/Debug-Kernels, die Spiele nicht nutzen.
 
-Alle Patches sind Byte-Muster. Ändert ein Treiber oder eine Runtime sie, steht das im Log und es wird nichts gepatcht,
-abstürzen kann es dadurch nicht.
+Die Patch-Stellen werden über Anker gefunden statt über feste Offsets: den Fehlertext, den eine Sperre ausgibt (→ das
+`lea`, das ihn lädt → der eine bedingte Sprung in diesen Fehlerblock), exportierte Funktionen und Parameternamen neben dem
+Arch-Vergleich, den sie absichern. Gepatcht wird nur bei genau einem Treffer. Sonst steht das im Log und die Stelle bleibt
+unberührt, ein geänderter Treiber endet also in „nicht freigeschaltet“ statt in einem Absturz.
 
 ## Installation
 
